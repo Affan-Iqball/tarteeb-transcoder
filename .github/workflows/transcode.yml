@@ -103,7 +103,7 @@ jobs:
             echo "Uploading to Backblaze B2: $B2_PATH"
             
             # Sync the HLS output to Backblaze
-            b2 sync --replaceNewer "hls_output/$clean_filename/" "b2://${{ secrets.B2_BUCKET_NAME }}/$B2_PATH/"
+            b2 sync "hls_output/$clean_filename/" "b2://${{ secrets.B2_BUCKET_NAME }}/$B2_PATH/"
             
             # Clean up both the raw video and the generated HLS files to free up disk space for the next iteration
             echo "Cleaning up local files for $clean_filename to save disk space..."
