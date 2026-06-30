@@ -63,6 +63,7 @@ jobs:
 
       - name: Batch Transcode and Upload
         run: |
+          START_TIME=$(date +%s)
           SUBJECT_SLUG="${{ github.event.client_payload.subject_slug }}"
           
           # Find all video files (mp4, mkv, mov, avi) in the raw_downloads directory
@@ -80,6 +81,23 @@ jobs:
             clean_filename=$(echo "$filename_no_ext" | sed -e 's/[^A-Za-z0-9._-]/_/g')
             
             echo "Cleaned output folder name: $clean_filename"
+            B2_PATH="subjects/$SUBJECT_SLUG/batch_uploads/$clean_filename"
+            
+            # Check Timeout (5.5 hours = 19800 seconds)
+            CURRENT_TIME=$(date +%s)
+            ELAPSED=$((CURRENT_TIME - START_TIME))
+            if [ $ELAPSED -gt 19800 ]; then
+                echo "Approaching 6-hour limit ($ELAPSED seconds elapsed). Gracefully pausing..."
+                touch .timeout_reached
+                break
+            fi
+            
+            # Idempotency Check (Skip if already uploaded)
+            if b2 ls "b2://${{ secrets.B2_BUCKET_NAME }}/$B2_PATH/" 2>/dev/null | grep -q "playlist.m3u8"; then
+                echo "Already processed, skipping $video_path..."
+                rm -f "$video_path"
+                continue
+            fi
             
             # Create a dedicated output directory for this video's HLS files
             mkdir -p "hls_output/$clean_filename"
@@ -100,7 +118,6 @@ jobs:
             fi
             
             # Determine B2 Output Path
-            B2_PATH="subjects/$SUBJECT_SLUG/batch_uploads/$clean_filename"
             echo "Uploading to Backblaze B2: $B2_PATH"
             
             # Sync the HLS output to Backblaze
@@ -117,14 +134,22 @@ jobs:
           FINAL_B2_PATH="subjects/$SUBJECT_SLUG/batch_uploads"
           echo "FINAL_B2_PATH=$FINAL_B2_PATH" >> $GITHUB_ENV
 
-      - name: Notify Supabase (Completed)
+      - name: Notify Supabase (Completed or Paused)
         if: success()
         run: |
+          if [ -f .timeout_reached ]; then
+            FINAL_STATUS="paused"
+            ERR_MSG="\"Paused due to 6-hour timeout limit. Click Resume to continue.\""
+          else
+            FINAL_STATUS="completed"
+            ERR_MSG="null"
+          fi
+
           curl -X PATCH '${{ secrets.SUPABASE_URL }}/rest/v1/resource_requests?id=eq.${{ github.event.client_payload.request_id }}' \
           -H 'apikey: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}' \
           -H 'Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}' \
           -H 'Content-Type: application/json' \
-          -d "{\"status\": \"completed\", \"b2_output_path\": \"${{ env.FINAL_B2_PATH }}\", \"error_message\": null}"
+          -d "{\"status\": \"$FINAL_STATUS\", \"b2_output_path\": \"${{ env.FINAL_B2_PATH }}\", \"error_message\": $ERR_MSG}"
 
       - name: Notify Supabase (Failed)
         if: failure()
