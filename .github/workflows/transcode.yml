@@ -87,6 +87,7 @@ jobs:
             # Run FFmpeg Transcoding for this specific video
             ffmpeg -nostdin -i "$video_path" \
               -vf "scale=-2:720" -c:v libx264 -crf 23 -preset fast \
+              -force_key_frames "expr:gte(t,n_forced*10)" -sc_threshold 0 \
               -c:a aac -b:a 128k -ac 2 \
               -hls_time 10 -hls_playlist_type vod \
               -hls_segment_filename "hls_output/$clean_filename/segment_%03d.ts" \
