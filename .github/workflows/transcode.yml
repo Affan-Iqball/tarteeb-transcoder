@@ -85,7 +85,7 @@ jobs:
             mkdir -p "hls_output/$clean_filename"
             
             # Run FFmpeg Transcoding for this specific video
-            ffmpeg -i "$video_path" \
+            ffmpeg -nostdin -i "$video_path" \
               -vf "scale=-2:720" -c:v libx264 -crf 23 -preset fast \
               -c:a aac -b:a 128k -ac 2 \
               -hls_time 10 -hls_playlist_type vod \
