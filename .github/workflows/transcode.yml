@@ -1,22 +1,18 @@
-name: Transcode Video to HLS
+name: Transcode Video Pipeline (Batch Support)
 
 on:
   repository_dispatch:
-    types: [transcode-video]
+    types: [transcode_video]
 
 jobs:
-  transcode:
+  transcode_and_upload:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-
       - name: Free Disk Space (Ubuntu)
         uses: jlumbroso/free-disk-space@main
         with:
-          tool-cache: false
+          tool-cache: true
           android: true
           dotnet: true
           haskell: true
@@ -24,84 +20,116 @@ jobs:
           docker-images: true
           swap-storage: true
 
-      - name: Setup Python
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
-          
-      - name: Install dependencies
+
+      - name: Install Dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install gdown
           sudo apt-get update
-          sudo apt-get install -y ffmpeg curl
+          sudo apt-get install -y ffmpeg jq
+          pip install gdown
 
-      - name: Set up Supabase Status Updater script
+      - name: Notify Supabase (Processing)
         run: |
-          cat << 'EOF' > update_status.sh
-          #!/bin/bash
-          STATUS=$1
-          MSG=$2
-          PATH_VAL=$3
+          curl -X PATCH '${{ secrets.SUPABASE_URL }}/rest/v1/resource_requests?id=eq.${{ github.event.client_payload.request_id }}' \
+          -H 'apikey: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}' \
+          -H 'Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}' \
+          -H 'Content-Type: application/json' \
+          -d '{"status": "processing"}'
+
+      - name: Download Files (gdown)
+        run: |
+          # Create a working directory for downloads
+          mkdir -p raw_downloads
+          cd raw_downloads
           
-          curl -X PATCH "$SUPABASE_URL/rest/v1/resource_requests?id=eq.$REQUEST_ID" \
-          -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
-          -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
-          -H "Content-Type: application/json" \
-          -d "{\"status\": \"$STATUS\", \"error_message\": \"$MSG\", \"b2_output_path\": \"$PATH_VAL\"}"
-          EOF
-          chmod +x update_status.sh
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          REQUEST_ID: ${{ github.event.client_payload.request_id }}
+          # We pass the URL to download.py, which will handle single files or entire folders
+          python ../download.py "${{ github.event.client_payload.drive_url }}"
+          
+          echo "Download phase completed. Files found:"
+          find . -type f
 
-      - name: Download Video from Google Drive
-        id: download
-        run: python download.py "${{ github.event.client_payload.drive_url }}"
-
-      - name: Handle Download Failure
-        if: failure() && steps.download.outcome == 'failure'
-        run: ./update_status.sh "failed" "Failed to download video from Google Drive. Ensure the link is set to 'Anyone with the link can view'." ""
-
-      - name: Transcode to HLS (720p)
-        id: transcode
+      - name: Setup Backblaze B2 CLI
         run: |
-          mkdir hls_output
-          # Compress to 720p (scale=-2:720) and segment every 10 seconds
-          ffmpeg -i raw_video.mp4 \
-            -c:v libx264 -preset fast -crf 23 -vf scale=-2:720 \
-            -c:a aac -b:a 128k \
-            -hls_time 10 -hls_playlist_type vod -hls_segment_filename 'hls_output/segment_%03d.ts' \
-            hls_output/playlist.m3u8
+          curl -L https://github.com/Backblaze/B2_Command_Line_Tool/releases/latest/download/b2-linux -o b2
+          chmod +x b2
+          sudo mv b2 /usr/local/bin/
+          b2 account authorize ${{ secrets.B2_APPLICATION_KEY_ID }} ${{ secrets.B2_APPLICATION_KEY }}
 
-      - name: Handle Transcode Failure
-        if: failure() && steps.transcode.outcome == 'failure'
-        run: ./update_status.sh "failed" "FFmpeg failed to transcode the video. The file might be corrupted or unsupported." ""
-
-      - name: Delete Raw Video (Free up disk space for upload)
-        run: rm raw_video.mp4
-
-      - name: Install Backblaze B2 CLI
-        run: pip install b2
-
-      - name: Authorize B2
-        run: b2 account authorize ${{ secrets.B2_APPLICATION_KEY_ID }} ${{ secrets.B2_APPLICATION_KEY }}
-
-      - name: Upload HLS to B2
-        id: upload
-        env:
-          SUBJECT_SLUG: ${{ github.event.client_payload.subject_slug }}
-          LESSON_ID: ${{ github.event.client_payload.lesson_id }}
-          BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
+      - name: Batch Transcode and Upload
         run: |
-          TARGET_DIR="subjects/$SUBJECT_SLUG/lesson_$LESSON_ID"
-          b2 sync hls_output/ b2://$BUCKET_NAME/$TARGET_DIR/
-          echo "B2_TARGET_DIR=$TARGET_DIR" >> $GITHUB_ENV
+          SUBJECT_SLUG="${{ github.event.client_payload.subject_slug }}"
+          
+          # Find all video files (mp4, mkv, mov, avi) in the raw_downloads directory
+          # We use a while read loop to handle filenames with spaces correctly
+          find raw_downloads -type f \( -iname "*.mp4" -o -iname "*.mkv" -o -iname "*.mov" -o -iname "*.avi" \) -print0 | while IFS= read -r -d '' video_path; do
+            echo "======================================================="
+            echo "Processing video: $video_path"
+            echo "======================================================="
+            
+            # Extract just the filename without extension
+            filename=$(basename -- "$video_path")
+            filename_no_ext="${filename%.*}"
+            
+            # Clean filename for URL safety (replace spaces/special chars with underscores)
+            clean_filename=$(echo "$filename_no_ext" | sed -e 's/[^A-Za-z0-9._-]/_/g')
+            
+            echo "Cleaned output folder name: $clean_filename"
+            
+            # Create a dedicated output directory for this video's HLS files
+            mkdir -p "hls_output/$clean_filename"
+            
+            # Run FFmpeg Transcoding for this specific video
+            ffmpeg -i "$video_path" \
+              -vf "scale=-2:720" -c:v libx264 -crf 23 -preset fast \
+              -c:a aac -b:a 128k -ac 2 \
+              -hls_time 10 -hls_playlist_type vod \
+              -hls_segment_filename "hls_output/$clean_filename/segment_%03d.ts" \
+              "hls_output/$clean_filename/playlist.m3u8"
+              
+            # If ffmpeg failed, we log it and continue to the next file
+            if [ $? -ne 0 ]; then
+                echo "FFmpeg failed for $video_path. Skipping..."
+                continue
+            fi
+            
+            # Determine B2 Output Path
+            B2_PATH="subjects/$SUBJECT_SLUG/batch_uploads/$clean_filename"
+            echo "Uploading to Backblaze B2: $B2_PATH"
+            
+            # Sync the HLS output to Backblaze
+            b2 sync --replaceNewer "hls_output/$clean_filename/" "b2://${{ secrets.B2_BUCKET_NAME }}/$B2_PATH/"
+            
+            # Clean up both the raw video and the generated HLS files to free up disk space for the next iteration
+            echo "Cleaning up local files for $clean_filename to save disk space..."
+            rm -f "$video_path"
+            rm -rf "hls_output/$clean_filename"
+            
+          done
+          
+          # Final output path reference (the root batch folder)
+          FINAL_B2_PATH="subjects/$SUBJECT_SLUG/batch_uploads"
+          echo "FINAL_B2_PATH=$FINAL_B2_PATH" >> $GITHUB_ENV
 
-      - name: Handle Upload Failure
-        if: failure() && steps.upload.outcome == 'failure'
-        run: ./update_status.sh "failed" "Failed to upload HLS files to Backblaze B2." ""
+      - name: Notify Supabase (Completed)
+        if: success()
+        run: |
+          curl -X PATCH '${{ secrets.SUPABASE_URL }}/rest/v1/resource_requests?id=eq.${{ github.event.client_payload.request_id }}' \
+          -H 'apikey: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}' \
+          -H 'Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}' \
+          -H 'Content-Type: application/json' \
+          -d "{\"status\": \"completed\", \"b2_output_path\": \"${{ env.FINAL_B2_PATH }}\", \"error_message\": null}"
 
-      - name: Mark Request as Completed in Supabase
-        run: ./update_status.sh "completed" "" "${{ env.B2_TARGET_DIR }}"
+      - name: Notify Supabase (Failed)
+        if: failure()
+        run: |
+          curl -X PATCH '${{ secrets.SUPABASE_URL }}/rest/v1/resource_requests?id=eq.${{ github.event.client_payload.request_id }}' \
+          -H 'apikey: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}' \
+          -H 'Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}' \
+          -H 'Content-Type: application/json' \
+          -d '{"status": "failed", "error_message": "GitHub Action pipeline failed. Check GitHub Logs for details."}'
