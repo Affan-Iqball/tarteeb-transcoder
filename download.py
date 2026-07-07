@@ -34,22 +34,46 @@ if __name__ == "__main__":
     
     try:
         if kind == 'folder' or 'folders' in url:
-            print("Detected Folder URL. Downloading entire folder...")
-            # Use gdown.download_folder
-            output = gdown.download_folder(url, quiet=False, use_cookies=False)
-            if not output:
-                print("Error: gdown failed to download the folder. Ensure the link is set to 'Anyone with the link can view'.")
+            import time
+            max_retries = 5
+            for attempt in range(max_retries):
+                try:
+                    # remaining_ok=True allows gdown to skip already downloaded files, resuming where it left off
+                    output = gdown.download_folder(url, quiet=False, use_cookies=False, remaining_ok=True)
+                    if output:
+                        print(f"Successfully downloaded folder contents to local directory.")
+                        break
+                    print(f"Attempt {attempt+1}/{max_retries} returned no files. Retrying in {(attempt+1)*5}s...")
+                except Exception as e:
+                    print(f"Exception during gdown download_folder (Attempt {attempt+1}/{max_retries}): {e}")
+                
+                if attempt < max_retries - 1:
+                    time.sleep(5 * (attempt + 1))
+            else:
+                print("Error: gdown failed to download the folder after multiple attempts.")
                 sys.exit(1)
-            print(f"Successfully downloaded folder contents to local directory.")
         else:
             print("Detected File URL. Downloading single file...")
             download_url = f"https://drive.google.com/uc?id={file_id}"
             output_filename = "raw_video.mp4"
-            output = gdown.download(download_url, output_filename, quiet=False, fuzzy=True, use_cookies=False)
-            if not output:
-                print("Error: gdown failed to download the file. Ensure the link is set to 'Anyone with the link can view'.")
+            
+            import time
+            max_retries = 5
+            for attempt in range(max_retries):
+                try:
+                    output = gdown.download(download_url, output_filename, quiet=False, fuzzy=True, use_cookies=False)
+                    if output:
+                        print(f"Successfully downloaded to {output_filename}")
+                        break
+                    print(f"Attempt {attempt+1}/{max_retries} failed to download file. Retrying in {(attempt+1)*5}s...")
+                except Exception as e:
+                    print(f"Exception during gdown download (Attempt {attempt+1}/{max_retries}): {e}")
+                
+                if attempt < max_retries - 1:
+                    time.sleep(5 * (attempt + 1))
+            else:
+                print("Error: gdown failed to download the file after multiple attempts.")
                 sys.exit(1)
-            print(f"Successfully downloaded to {output_filename}")
         
         sys.exit(0)
     except Exception as e:
