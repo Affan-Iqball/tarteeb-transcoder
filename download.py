@@ -38,8 +38,8 @@ if __name__ == "__main__":
             max_retries = 5
             for attempt in range(max_retries):
                 try:
-                    # remaining_ok=True allows gdown to skip already downloaded files, resuming where it left off
-                    output = gdown.download_folder(url, quiet=False, use_cookies=False, remaining_ok=True)
+                    # removing remaining_ok=True for gdown >= 6.x compatibility
+                    output = gdown.download_folder(url, quiet=False, use_cookies=False)
                     if output:
                         print(f"Successfully downloaded folder contents to local directory.")
                         break
