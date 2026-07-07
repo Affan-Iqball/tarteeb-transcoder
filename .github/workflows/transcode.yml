@@ -5,9 +5,11 @@ on:
     types: [transcode_video]
 
 jobs:
-  transcode_and_upload:
+  prepare_batch:
     runs-on: ubuntu-latest
-
+    outputs:
+      matrix: ${{ steps.prepare.outputs.matrix }}
+      has_videos: ${{ steps.prepare.outputs.has_videos }}
     steps:
       - name: Free Disk Space (Ubuntu)
         uses: jlumbroso/free-disk-space@main
@@ -31,8 +33,15 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg jq
+          sudo apt-get install -y jq
           pip install gdown
+
+      - name: Setup Backblaze B2 CLI
+        run: |
+          curl -L https://github.com/Backblaze/B2_Command_Line_Tool/releases/latest/download/b2-linux -o b2
+          chmod +x b2
+          sudo mv b2 /usr/local/bin/
+          b2 account authorize ${{ secrets.B2_APPLICATION_KEY_ID }} ${{ secrets.B2_APPLICATION_KEY }}
 
       - name: Notify Supabase (Processing)
         run: |
@@ -42,17 +51,42 @@ jobs:
           -H 'Content-Type: application/json' \
           -d '{"status": "processing"}'
 
-      - name: Download Files (gdown)
+      - name: Run prepare_batch.py
+        id: prepare
         run: |
-          # Create a working directory for downloads
-          mkdir -p raw_downloads
-          cd raw_downloads
-          
-          # We pass the URL to download.py, which will handle single files or entire folders
-          python ../download.py "${{ github.event.client_payload.drive_url }}"
-          
-          echo "Download phase completed. Files found:"
-          find . -type f
+          python prepare_batch.py \
+            --drive_url "${{ github.event.client_payload.drive_url }}" \
+            --request_id "${{ github.event.client_payload.request_id }}" \
+            --subject_slug "${{ github.event.client_payload.subject_slug }}" \
+            --b2_bucket "${{ secrets.B2_BUCKET_NAME }}"
+
+  transcode_matrix:
+    needs: prepare_batch
+    if: ${{ needs.prepare_batch.outputs.has_videos == 'true' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        video: ${{ fromJSON(needs.prepare_batch.outputs.matrix) }}
+    steps:
+      - name: Free Disk Space (Ubuntu)
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Install Transcoding Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
 
       - name: Setup Backblaze B2 CLI
         run: |
@@ -61,102 +95,55 @@ jobs:
           sudo mv b2 /usr/local/bin/
           b2 account authorize ${{ secrets.B2_APPLICATION_KEY_ID }} ${{ secrets.B2_APPLICATION_KEY }}
 
-      - name: Batch Transcode and Upload
+      - name: Download Raw Video
         run: |
-          START_TIME=$(date +%s)
-          SUBJECT_SLUG="${{ github.event.client_payload.subject_slug }}"
-          
-          # Find all video files (mp4, mkv, mov, avi) in the raw_downloads directory
-          # We use a while read loop to handle filenames with spaces correctly
-          find raw_downloads -type f \( -iname "*.mp4" -o -iname "*.mkv" -o -iname "*.mov" -o -iname "*.avi" \) -print0 | while IFS= read -r -d '' video_path; do
-            echo "======================================================="
-            echo "Processing video: $video_path"
-            echo "======================================================="
-            
-            # Extract the relative path to prevent collisions if identically named files exist in different subfolders
-            # Example: "raw_downloads/Chapter1/lesson.mp4" -> "Chapter1/lesson.mp4"
-            relative_path="${video_path#raw_downloads/}"
-            relative_path_no_ext="${relative_path%.*}"
-            
-            # Clean filename for URL safety (replace spaces, slashes, and special chars with underscores)
-            clean_filename=$(echo "$relative_path_no_ext" | sed -e 's/[^A-Za-z0-9._-]/_/g')
-            
-            echo "Cleaned output folder name: $clean_filename"
-            B2_PATH="subjects/$SUBJECT_SLUG/batch_uploads/$clean_filename"
-            
-            # Check Timeout (5.5 hours = 19800 seconds)
-            CURRENT_TIME=$(date +%s)
-            ELAPSED=$((CURRENT_TIME - START_TIME))
-            if [ $ELAPSED -gt 19800 ]; then
-                echo "Approaching 6-hour limit ($ELAPSED seconds elapsed). Gracefully pausing..."
-                touch .timeout_reached
-                break
-            fi
-            
-            # Idempotency Check (Skip if already uploaded)
-            if b2 ls "b2://${{ secrets.B2_BUCKET_NAME }}/$B2_PATH/" 2>/dev/null | grep -q "playlist.m3u8"; then
-                echo "Already processed, skipping $video_path..."
-                rm -f "$video_path"
-                continue
-            fi
-            
-            # Create a dedicated output directory for this video's HLS files
-            mkdir -p "hls_output/$clean_filename"
-            
-            # Run FFmpeg Transcoding for this specific video
-            ffmpeg -nostdin -i "$video_path" \
-              -vf "scale=-2:720" -c:v libx264 -crf 23 -preset fast \
-              -force_key_frames "expr:gte(t,n_forced*10)" -sc_threshold 0 \
-              -c:a aac -b:a 128k -ac 2 \
-              -hls_time 10 -hls_playlist_type vod \
-              -hls_segment_filename "hls_output/$clean_filename/segment_%03d.ts" \
-              "hls_output/$clean_filename/playlist.m3u8"
-              
-            # If ffmpeg failed, we log it and continue to the next file
-            if [ $? -ne 0 ]; then
-                echo "FFmpeg failed for $video_path. Skipping..."
-                continue
-            fi
-            
-            # Determine B2 Output Path
-            echo "Uploading to Backblaze B2: $B2_PATH"
-            
-            # Sync the HLS output to Backblaze
-            b2 sync "hls_output/$clean_filename/" "b2://${{ secrets.B2_BUCKET_NAME }}/$B2_PATH/"
-            
-            # Clean up both the raw video and the generated HLS files to free up disk space for the next iteration
-            echo "Cleaning up local files for $clean_filename to save disk space..."
-            rm -f "$video_path"
-            rm -rf "hls_output/$clean_filename"
-            
-          done
-          
-          # Final output path reference (the root batch folder)
-          FINAL_B2_PATH="subjects/$SUBJECT_SLUG/batch_uploads"
-          echo "FINAL_B2_PATH=$FINAL_B2_PATH" >> $GITHUB_ENV
+          b2 file download "b2://${{ secrets.B2_BUCKET_NAME }}/${{ matrix.video.temp_b2_key }}" "raw_video${{ matrix.video.ext }}"
 
-      - name: Notify Supabase (Completed or Paused)
-        if: success()
+      - name: Transcode to HLS
         run: |
-          if [ -f .timeout_reached ]; then
-            FINAL_STATUS="paused"
-            ERR_MSG="\"Paused due to 6-hour timeout limit. Click Resume to continue.\""
-          else
-            FINAL_STATUS="completed"
-            ERR_MSG="null"
-          fi
+          mkdir -p "hls_output/${{ matrix.video.clean_name }}"
+          ffmpeg -nostdin -i "raw_video${{ matrix.video.ext }}" \
+            -vf "scale=-2:720" -c:v libx264 -crf 23 -preset fast \
+            -force_key_frames "expr:gte(t,n_forced*10)" -sc_threshold 0 \
+            -c:a aac -b:a 128k -ac 2 \
+            -hls_time 10 -hls_playlist_type vod \
+            -hls_segment_filename "hls_output/${{ matrix.video.clean_name }}/segment_%03d.ts" \
+            "hls_output/${{ matrix.video.clean_name }}/playlist.m3u8"
 
+      - name: Upload HLS to B2
+        run: |
+          b2 sync "hls_output/${{ matrix.video.clean_name }}/" "b2://${{ secrets.B2_BUCKET_NAME }}/subjects/${{ github.event.client_payload.subject_slug }}/batch_uploads/${{ matrix.video.clean_name }}/"
+
+  finalize_batch:
+    needs: [prepare_batch, transcode_matrix]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Backblaze B2 CLI
+        run: |
+          curl -L https://github.com/Backblaze/B2_Command_Line_Tool/releases/latest/download/b2-linux -o b2
+          chmod +x b2
+          sudo mv b2 /usr/local/bin/
+          b2 account authorize ${{ secrets.B2_APPLICATION_KEY_ID }} ${{ secrets.B2_APPLICATION_KEY }}
+
+      - name: Clean Temporary Raw Files from B2
+        run: |
+          b2 rm --recursive --versions "b2://${{ secrets.B2_BUCKET_NAME }}/raw_temp/${{ github.event.client_payload.request_id }}/" || true
+
+      - name: Notify Supabase (Success)
+        if: ${{ needs.prepare_batch.result == 'success' && (needs.prepare_batch.outputs.has_videos == 'false' || needs.transcode_matrix.result == 'success') }}
+        run: |
           curl -X PATCH '${{ secrets.SUPABASE_URL }}/rest/v1/resource_requests?id=eq.${{ github.event.client_payload.request_id }}' \
           -H 'apikey: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}' \
           -H 'Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}' \
           -H 'Content-Type: application/json' \
-          -d "{\"status\": \"$FINAL_STATUS\", \"b2_output_path\": \"${{ env.FINAL_B2_PATH }}\", \"error_message\": $ERR_MSG}"
+          -d '{"status": "completed", "b2_output_path": "subjects/${{ github.event.client_payload.subject_slug }}/batch_uploads", "error_message": null}'
 
       - name: Notify Supabase (Failed)
-        if: failure()
+        if: ${{ !(needs.prepare_batch.result == 'success' && (needs.prepare_batch.outputs.has_videos == 'false' || needs.transcode_matrix.result == 'success')) }}
         run: |
           curl -X PATCH '${{ secrets.SUPABASE_URL }}/rest/v1/resource_requests?id=eq.${{ github.event.client_payload.request_id }}' \
           -H 'apikey: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}' \
           -H 'Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}' \
           -H 'Content-Type: application/json' \
-          -d '{"status": "failed", "error_message": "GitHub Action pipeline failed. Check GitHub Logs for details."}'
+          -d '{"status": "failed", "error_message": "Transcoding job failed. Please check GitHub Action logs."}'
