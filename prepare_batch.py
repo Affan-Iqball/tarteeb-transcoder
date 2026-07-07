@@ -46,8 +46,10 @@ def main():
             file_path = f.path
             file_id = f.id
             if file_path.lower().endswith(('.mp4', '.mkv', '.mov', '.avi')):
-                rel_path_no_ext, ext = os.path.splitext(file_path)
-                clean_name = re.sub(r'[^A-Za-z0-9._-]', '_', rel_path_no_ext)
+                base_name = os.path.basename(file_path)
+                name_no_ext, ext = os.path.splitext(base_name)
+                # Replace invalid chars with underscore and strip trailing/leading underscores
+                clean_name = re.sub(r'[^A-Za-z0-9._-]', '_', name_no_ext).strip('_')
                 
                 # Check Idempotency (Skip if playlist.m3u8 already exists on B2)
                 import subprocess
