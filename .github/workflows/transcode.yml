@@ -98,7 +98,7 @@ jobs:
 
       - name: Download Raw Video
         run: |
-          gdown "https://drive.google.com/uc?id=${{ matrix.video.file_id }}" -O "raw_video${{ matrix.video.ext }}" --fuzzy --use-cookies=false
+          gdown "https://drive.google.com/uc?id=${{ matrix.video.file_id }}" -O "raw_video${{ matrix.video.ext }}" --no-cookies
 
       - name: Transcode to HLS
         run: |
