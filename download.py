@@ -1,6 +1,18 @@
 import sys
 import gdown
 import re
+import traceback
+
+# Monkey-patch gdown.download to prevent individual file errors from crashing the whole folder download
+original_download = gdown.download
+def safe_download(*args, **kwargs):
+    try:
+        return original_download(*args, **kwargs)
+    except Exception as e:
+        print(f"[Warning] Failed to download a file, skipping: {e}")
+        return None
+
+gdown.download = safe_download
 
 def extract_id(url):
     # Try to match the ID in common Google Drive formats
