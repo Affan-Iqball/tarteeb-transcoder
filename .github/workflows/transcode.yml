@@ -87,6 +87,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
+          pip install gdown
 
       - name: Setup Backblaze B2 CLI
         run: |
@@ -97,7 +98,7 @@ jobs:
 
       - name: Download Raw Video
         run: |
-          b2 file download "b2://${{ secrets.B2_BUCKET_NAME }}/${{ matrix.video.temp_b2_key }}" "raw_video${{ matrix.video.ext }}"
+          gdown "https://drive.google.com/uc?id=${{ matrix.video.file_id }}" -O "raw_video${{ matrix.video.ext }}" --fuzzy --use-cookies=false
 
       - name: Transcode to HLS
         run: |
@@ -119,17 +120,6 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Setup Backblaze B2 CLI
-        run: |
-          curl -L https://github.com/Backblaze/B2_Command_Line_Tool/releases/latest/download/b2-linux -o b2
-          chmod +x b2
-          sudo mv b2 /usr/local/bin/
-          b2 account authorize ${{ secrets.B2_APPLICATION_KEY_ID }} ${{ secrets.B2_APPLICATION_KEY }}
-
-      - name: Clean Temporary Raw Files from B2
-        run: |
-          b2 rm --recursive --versions "b2://${{ secrets.B2_BUCKET_NAME }}/raw_temp/${{ github.event.client_payload.request_id }}/" || true
-
       - name: Notify Supabase (Success)
         if: ${{ needs.prepare_batch.result == 'success' && (needs.prepare_batch.outputs.has_videos == 'false' || needs.transcode_matrix.result == 'success') }}
         run: |
