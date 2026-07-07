@@ -73,12 +73,13 @@ jobs:
             echo "Processing video: $video_path"
             echo "======================================================="
             
-            # Extract just the filename without extension
-            filename=$(basename -- "$video_path")
-            filename_no_ext="${filename%.*}"
+            # Extract the relative path to prevent collisions if identically named files exist in different subfolders
+            # Example: "raw_downloads/Chapter1/lesson.mp4" -> "Chapter1/lesson.mp4"
+            relative_path="${video_path#raw_downloads/}"
+            relative_path_no_ext="${relative_path%.*}"
             
-            # Clean filename for URL safety (replace spaces/special chars with underscores)
-            clean_filename=$(echo "$filename_no_ext" | sed -e 's/[^A-Za-z0-9._-]/_/g')
+            # Clean filename for URL safety (replace spaces, slashes, and special chars with underscores)
+            clean_filename=$(echo "$relative_path_no_ext" | sed -e 's/[^A-Za-z0-9._-]/_/g')
             
             echo "Cleaned output folder name: $clean_filename"
             B2_PATH="subjects/$SUBJECT_SLUG/batch_uploads/$clean_filename"
