@@ -45,7 +45,7 @@ jobs:
 
       - name: Notify Supabase (Processing)
         run: |
-          curl -X PATCH '${{ secrets.SUPABASE_URL }}/rest/v1/resource_requests?id=eq.${{ github.event.client_payload.request_id }}' \
+          curl -sSf -X PATCH '${{ secrets.SUPABASE_URL }}/rest/v1/resource_requests?id=eq.${{ github.event.client_payload.request_id }}' \
           -H 'apikey: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}' \
           -H 'Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}' \
           -H 'Content-Type: application/json' \
@@ -133,7 +133,7 @@ jobs:
       - name: Notify Supabase (Success)
         if: ${{ needs.prepare_batch.result == 'success' && (needs.prepare_batch.outputs.has_videos == 'false' || needs.transcode_matrix.result == 'success') }}
         run: |
-          curl -X PATCH '${{ secrets.SUPABASE_URL }}/rest/v1/resource_requests?id=eq.${{ github.event.client_payload.request_id }}' \
+          curl -sSf -X PATCH '${{ secrets.SUPABASE_URL }}/rest/v1/resource_requests?id=eq.${{ github.event.client_payload.request_id }}' \
           -H 'apikey: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}' \
           -H 'Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}' \
           -H 'Content-Type: application/json' \
@@ -142,7 +142,7 @@ jobs:
       - name: Notify Supabase (Failed)
         if: ${{ !(needs.prepare_batch.result == 'success' && (needs.prepare_batch.outputs.has_videos == 'false' || needs.transcode_matrix.result == 'success')) }}
         run: |
-          curl -X PATCH '${{ secrets.SUPABASE_URL }}/rest/v1/resource_requests?id=eq.${{ github.event.client_payload.request_id }}' \
+          curl -sSf -X PATCH '${{ secrets.SUPABASE_URL }}/rest/v1/resource_requests?id=eq.${{ github.event.client_payload.request_id }}' \
           -H 'apikey: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}' \
           -H 'Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}' \
           -H 'Content-Type: application/json' \
