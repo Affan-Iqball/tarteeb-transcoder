@@ -58,7 +58,11 @@ jobs:
             --drive_url "${{ github.event.client_payload.drive_url }}" \
             --request_id "${{ github.event.client_payload.request_id }}" \
             --subject_slug "${{ github.event.client_payload.subject_slug }}" \
-            --b2_bucket "${{ secrets.B2_BUCKET_NAME }}"
+            --b2_bucket "${{ secrets.B2_BUCKET_NAME }}" \
+            ${{ github.event.client_payload.file_ids_only && format('--file_ids_only ''{0}''', github.event.client_payload.file_ids_only) || '' }}
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
   transcode_matrix:
     needs: prepare_batch
@@ -96,9 +100,25 @@ jobs:
           sudo mv b2 /usr/local/bin/
           b2 account authorize ${{ secrets.B2_APPLICATION_KEY_ID }} ${{ secrets.B2_APPLICATION_KEY }}
 
+      - name: Log Download Start
+        run: |
+          curl -sSf -X POST '${{ secrets.SUPABASE_URL }}/rest/v1/request_logs' \
+          -H 'apikey: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}' \
+          -H 'Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}' \
+          -H 'Content-Type: application/json' \
+          -d "{\"request_id\": \"${{ github.event.client_payload.request_id }}\", \"message\": \"Downloading raw video from Drive (ID: ${{ matrix.video.file_id }})...\"}"
+
       - name: Download Raw Video
         run: |
           gdown "https://drive.google.com/uc?id=${{ matrix.video.file_id }}" -O "raw_video${{ matrix.video.ext }}" --no-cookies
+
+      - name: Log Transcode Start
+        run: |
+          curl -sSf -X POST '${{ secrets.SUPABASE_URL }}/rest/v1/request_logs' \
+          -H 'apikey: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}' \
+          -H 'Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}' \
+          -H 'Content-Type: application/json' \
+          -d "{\"request_id\": \"${{ github.event.client_payload.request_id }}\", \"message\": \"Transcoding ${{ matrix.video.clean_name }} to HLS format...\"}"
 
       - name: Transcode to HLS
         run: |
@@ -111,9 +131,25 @@ jobs:
             -hls_segment_filename "hls_output/${{ matrix.video.clean_name }}/segment_%03d.ts" \
             "hls_output/${{ matrix.video.clean_name }}/playlist.m3u8"
 
+      - name: Log Upload Start
+        run: |
+          curl -sSf -X POST '${{ secrets.SUPABASE_URL }}/rest/v1/request_logs' \
+          -H 'apikey: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}' \
+          -H 'Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}' \
+          -H 'Content-Type: application/json' \
+          -d "{\"request_id\": \"${{ github.event.client_payload.request_id }}\", \"message\": \"Uploading processed HLS chunks to B2 Storage (${{ matrix.video.clean_name }})...\"}"
+
       - name: Upload HLS to B2
         run: |
           b2 sync "hls_output/${{ matrix.video.clean_name }}/" "b2://${{ secrets.B2_BUCKET_NAME }}/subjects/${{ github.event.client_payload.subject_slug }}/batch_uploads/${{ matrix.video.clean_name }}/"
+
+      - name: Log Transcode Complete
+        run: |
+          curl -sSf -X POST '${{ secrets.SUPABASE_URL }}/rest/v1/request_logs' \
+          -H 'apikey: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}' \
+          -H 'Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}' \
+          -H 'Content-Type: application/json' \
+          -d "{\"request_id\": \"${{ github.event.client_payload.request_id }}\", \"message\": \"Video ${{ matrix.video.clean_name }} completed successfully!\"}"
 
   finalize_batch:
     needs: [prepare_batch, transcode_matrix]

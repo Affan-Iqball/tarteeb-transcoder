@@ -4,14 +4,36 @@ import re
 import json
 import argparse
 import gdown
+import urllib.request
+
+def push_log(request_id, message):
+    supabase_url = os.environ.get("SUPABASE_URL")
+    supabase_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+    if not supabase_url or not supabase_key:
+        return
+    
+    url = f"{supabase_url}/rest/v1/request_logs"
+    headers = {
+        "apikey": supabase_key,
+        "Authorization": f"Bearer {supabase_key}",
+        "Content-Type": "application/json"
+    }
+    data = json.dumps({"request_id": request_id, "message": message}).encode("utf-8")
+    
+    try:
+        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        with urllib.request.urlopen(req) as response:
+            pass
+    except Exception as e:
+        print(f"Failed to push log: {e}")
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Prepare video batch for matrix transcoding.")
     parser.add_argument("--drive_url", required=True, help="Google Drive URL")
     parser.add_argument("--request_id", required=True, help="Supabase request ID")
     parser.add_argument("--subject_slug", required=True, help="Subject slug")
-    # b2_bucket is kept for CLI compatibility but not used in this step anymore
     parser.add_argument("--b2_bucket", required=False, help="Backblaze B2 bucket name (unused)")
+    parser.add_argument("--file_ids_only", required=False, help="JSON string of specific file IDs to process")
     return parser.parse_args()
 
 def extract_id(url):
@@ -26,7 +48,10 @@ def extract_id(url):
 def main():
     args = parse_args()
     
-    print(f"Fetching metadata from Google Drive: {args.drive_url}")
+    msg = f"Initializing batch pipeline. Fetching metadata from Google Drive..."
+    print(msg)
+    push_log(args.request_id, msg)
+    
     file_id, kind = extract_id(args.drive_url)
     
     if not file_id:
@@ -35,8 +60,19 @@ def main():
         
     matrix_data = []
     
+    target_file_ids = []
+    if args.file_ids_only:
+        try:
+            target_file_ids = json.loads(args.file_ids_only)
+            print(f"Targeting specific files: {target_file_ids}")
+        except:
+            print("Failed to parse file_ids_only JSON.")
+    
     if kind == 'folder' or 'folders' in args.drive_url:
-        print("Folder detected. Fetching file structure instantly...")
+        msg = "Folder detected. Scanning files recursively..."
+        print(msg)
+        push_log(args.request_id, msg)
+        
         files = gdown.download_folder(args.drive_url, skip_download=True, use_cookies=False, quiet=False)
         if not files:
             print("No files found or unable to access folder.")
@@ -44,14 +80,20 @@ def main():
             
         for f in files:
             file_path = f.path
-            file_id = f.id
+            current_file_id = f.id
             if file_path.lower().endswith(('.mp4', '.mkv', '.mov', '.avi')):
-                base_name = os.path.basename(file_path)
-                name_no_ext, ext = os.path.splitext(base_name)
-                # Replace invalid chars with underscore and strip trailing/leading underscores
-                clean_name = re.sub(r'[^A-Za-z0-9._-]', '_', name_no_ext).strip('_')
                 
-                # Check Idempotency (Skip if playlist.m3u8 already exists on B2)
+                # If specific file IDs were requested, skip others
+                if target_file_ids and current_file_id not in target_file_ids:
+                    continue
+                
+                base_name = os.path.basename(file_path)
+                _, ext = os.path.splitext(base_name)
+                
+                # Use File ID as the unique identifier for storage
+                clean_name = current_file_id
+                
+                # Check Idempotency (Skip if playlist.m3u8 already exists on B2 under this file ID)
                 import subprocess
                 if args.b2_bucket:
                     b2_dest_dir = f"subjects/{args.subject_slug}/batch_uploads/{clean_name}"
@@ -59,13 +101,13 @@ def main():
                     ls_result = subprocess.run(ls_cmd, capture_output=True, text=True)
                     
                     if "playlist.m3u8" in ls_result.stdout:
-                        print(f"Already processed, skipping {file_path}...")
+                        print(f"Already processed, skipping {file_path} (ID: {clean_name})...")
                         continue
                 
                 matrix_data.append({
                     "clean_name": clean_name,
                     "ext": ext,
-                    "file_id": file_id
+                    "file_id": current_file_id
                 })
     else:
         print("Single file detected.")
@@ -77,7 +119,9 @@ def main():
             "file_id": file_id
         })
                 
-    print(f"Found {len(matrix_data)} video files.")
+    msg = f"Scan complete. Found {len(matrix_data)} video files to transcode."
+    print(msg)
+    push_log(args.request_id, msg)
         
     # Output matrix to GITHUB_OUTPUT
     print(f"Matrix output: {json.dumps(matrix_data)}")
