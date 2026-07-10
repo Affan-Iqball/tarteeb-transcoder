@@ -11,17 +11,6 @@ jobs:
       matrix: ${{ steps.prepare.outputs.matrix }}
       has_videos: ${{ steps.prepare.outputs.has_videos }}
     steps:
-      - name: Free Disk Space (Ubuntu)
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: true
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: true
-          swap-storage: true
-
       - name: Checkout Code
         uses: actions/checkout@v3
 
@@ -75,6 +64,7 @@ jobs:
         video: ${{ fromJSON(needs.prepare_batch.outputs.matrix) }}
     steps:
       - name: Free Disk Space (Ubuntu)
+        if: ${{ matrix.video.needs_cleanup }}
         uses: jlumbroso/free-disk-space@main
         with:
           tool-cache: true
@@ -127,7 +117,8 @@ jobs:
         run: |
           mkdir -p "hls_output/${{ matrix.video.clean_name }}"
           ffmpeg -nostdin -i "raw_video${{ matrix.video.ext }}" \
-            -vf "scale=-2:720" -c:v libx264 -crf 23 -preset fast \
+            -vf "scale=-2:720" -c:v libx264 -crf 28 -preset fast \
+            -b:v 1200k -maxrate 1500k -bufsize 2400k \
             -force_key_frames "expr:gte(t,n_forced*10)" -sc_threshold 0 \
             -c:a aac -b:a 128k -ac 2 \
             -hls_time 10 -hls_playlist_type vod \
