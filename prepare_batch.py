@@ -30,7 +30,7 @@ def list_videos(service, folder_id, current_path=""):
             q=query,
             pageSize=100,
             pageToken=page_token,
-            fields="nextPageToken, files(id, name, mimeType)"
+            fields="nextPageToken, files(id, name, mimeType, size)"
         ).execute()
         
         for item in results.get('files', []):
@@ -40,10 +40,12 @@ def list_videos(service, folder_id, current_path=""):
                 videos.extend(list_videos(service, item['id'], sub_path))
             else:
                 name_lower = item['name'].lower()
-                if name_lower.endswith(('.mp4', '.mkv', '.mov', '.avi')):
+                if name_lower.endswith(('.mp4', '.mkv', '.mov', '.avi')) or mime.startswith('video/'):
+                    size = int(item.get('size', 0))
                     videos.append({
                         'id': item['id'],
-                        'path': os.path.join(current_path, item['name'])
+                        'path': os.path.join(current_path, item['name']),
+                        'size': size
                     })
         page_token = results.get('nextPageToken')
         if not page_token:
@@ -126,6 +128,7 @@ def main():
         for f in files:
             file_path = f['path']
             current_file_id = f['id']
+            file_size = f.get('size', 0)
             
             # If specific file IDs were requested, skip others
             if target_file_ids and current_file_id not in target_file_ids:
@@ -148,19 +151,36 @@ def main():
                     print(f"Already processed, skipping {file_path} (ID: {clean_name})...")
                     continue
             
+            # Needs cleanup if size > 7 GB
+            needs_cleanup = file_size > 7 * 1024 * 1024 * 1024
+
             matrix_data.append({
                 "clean_name": clean_name,
                 "ext": ext,
-                "file_id": current_file_id
+                "file_id": current_file_id,
+                "needs_cleanup": needs_cleanup
             })
     else:
         print("Single file detected.")
+        service = get_drive_service()
+        try:
+            file_meta = service.files().get(fileId=file_id, fields="name, mimeType, size").execute()
+            name = file_meta.get('name', 'video')
+            _, ext = os.path.splitext(name)
+            size = int(file_meta.get('size', 0))
+        except Exception as e:
+            print(f"Error fetching single file metadata: {e}")
+            ext = ".mp4"
+            size = 0
+            
         clean_name = f"video_{args.request_id}"
-        ext = ".mp4"  # Default assumption for single file without metadata
+        needs_cleanup = size > 7 * 1024 * 1024 * 1024
+        
         matrix_data.append({
             "clean_name": clean_name,
             "ext": ext,
-            "file_id": file_id
+            "file_id": file_id,
+            "needs_cleanup": needs_cleanup
         })
                 
     msg = f"Scan complete. Found {len(matrix_data)} video files to transcode."
