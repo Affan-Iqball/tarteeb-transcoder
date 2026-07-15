@@ -30,7 +30,7 @@ def list_videos(service, folder_id, current_path=""):
             q=query,
             pageSize=100,
             pageToken=page_token,
-            fields="nextPageToken, files(id, name, mimeType, size)"
+            fields="nextPageToken, files(id, name, mimeType, size, shortcutDetails)"
         ).execute()
         
         for item in results.get('files', []):
@@ -38,6 +38,21 @@ def list_videos(service, folder_id, current_path=""):
             if mime == 'application/vnd.google-apps.folder':
                 sub_path = os.path.join(current_path, item['name'])
                 videos.extend(list_videos(service, item['id'], sub_path))
+            elif mime == 'application/vnd.google-apps.shortcut':
+                details = item.get('shortcutDetails', {})
+                target_mime = details.get('targetMimeType', '')
+                target_id = details.get('targetId')
+                if target_mime == 'application/vnd.google-apps.folder':
+                    sub_path = os.path.join(current_path, item['name'])
+                    videos.extend(list_videos(service, target_id, sub_path))
+                else:
+                    name_lower = item['name'].lower()
+                    if name_lower.endswith(('.mp4', '.mkv', '.mov', '.avi')) or target_mime.startswith('video/'):
+                        videos.append({
+                            'id': target_id,
+                            'path': os.path.join(current_path, item['name']),
+                            'size': int(item.get('size', 0))
+                        })
             else:
                 name_lower = item['name'].lower()
                 if name_lower.endswith(('.mp4', '.mkv', '.mov', '.avi')) or mime.startswith('video/'):
